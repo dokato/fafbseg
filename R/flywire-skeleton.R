@@ -84,7 +84,8 @@
 #'   can lead to oversimplification. Good for quick & dirty skeletonisations.
 #'   \code{"edge_collapse"} implements skeleton extraction by edge collapse
 #'   described Au et al. 2008. It's rather slow and doesn't scale well but is
-#'   really good at preserving topology.
+#'   really good at preserving topology. Another method is \code{"wavefront"} -
+#'   this algorithm tries to find rings of vertices and collapse them to their center.
 #' @param heal logical. Whether or not, if the neuron id fragmented, to stitch
 #'   multiple fragments into single neuron using minimum spanning tree.
 #' @param heal.threshold numeric. The threshold distance above which new
@@ -106,7 +107,6 @@
 #'   fellow leaf nodes for the rerooting process. Will be inaccurate at values
 #'   that are too high or too low. Should be about the size of the expected
 #'   soma.
-#' @param x a \code{nat::neuron} object.
 #' @param brain a \code{mesh3d} or \code{hxsurf} object within which a soma
 #'   cannot occur. For the re-rooting process. (Insect somata tend to lie
 #'   outside the brain proper)
@@ -139,6 +139,14 @@
 #' @param cpu double (of length one). Set a limit on the total cpu time in seconds.
 #' @param elapsed double (of length one). Set a limit on the total elapsed cpu time in seconds
 #' @param ... Additional arguments passed to \code{reticulate::py_run_string}.
+#' @param waves (for \code{method = "wavefront"}) Number of waves to run across the mesh. Each wave is
+#' initialized at a different vertex which produces slightly different rings.
+#' The final skeleton is produced from a mean  across all waves. More waves produce
+#' higher resolution skeletons but also introduce more noise.
+#' @param step_size (for \code{method = "wavefront"}) Values greater 1 effectively
+#' lead to binning of rings. For example a stepsize of 2 means that two adjacent
+#' vertex rings will be collapsed to the same center. This can help reduce noise
+#' in the skeleton
 #'
 #' @return A \code{nat::neuronlist} containing neuron skeleton objects.
 #'
@@ -197,7 +205,7 @@
 #'
 #'   Ratio: lower ratio = less vertices = faster
 #'
-#'   epsilon: lower target contraction rate = less steps = faster
+#'   epsilon: lower target contraction rate = lesssteps = faster
 #'
 #'   SL: faster contraction = pot. less steps to target contraction rate = faster
 #'
@@ -243,7 +251,7 @@ skeletor <- function(segments = NULL,
                      precision=1e-6,
                      validate = TRUE,
                      method.radii=c("knn","ray"),
-                     method=c('vertex_clusters','edge_collapse'),
+                     method=c('vertex_clusters','edge_collapse', 'wavefront'),
                      heal=TRUE,
                      heal.k=10L,
                      heal.threshold=Inf,
@@ -261,6 +269,8 @@ skeletor <- function(segments = NULL,
                      sample_weight = 0.1,
                      cpu = Inf,
                      elapsed = Inf,
+                     waves = 1,
+                     step_size = 1,
                     ...){
   if(is.null(segments)&&is.null(obj)){
     stop("Either the argument segments or obj must be given.")
@@ -321,6 +331,8 @@ skeletor <- function(segments = NULL,
                                          cluster_pos = cluster_pos,
                                          shape_weight = shape_weight,
                                          sample_weight = sample_weight,
+                                         waves = waves,
+                                         step_size = step_size,
                                          ...))),
                           cpu = cpu,
                           elapsed = elapsed)
@@ -389,7 +401,7 @@ py_skeletor <- function(id,
                         precision=1e-6,
                         validate = TRUE,
                         method.radii=c("knn","ray"),
-                        method=c('vertex_clusters','edge_collapse'),
+                        method=c('vertex_clusters','edge_collapse','wavefront'),
                         heal=TRUE,
                         heal.k=10L,
                         heal.threshold=Inf,
@@ -405,6 +417,8 @@ py_skeletor <- function(id,
                         cluster_pos = c("median", "center"),
                         shape_weight = 1,
                         sample_weight = 0.1,
+                        waves = 1,
+                        step_size = 1,
                         ...){
   stopifnot(length(id)==1)
   operator = match.arg(operator)
@@ -449,18 +463,25 @@ py_skeletor <- function(id,
     mesh = NULL
   }
   reticulate::py_run_string("m = tm.Trimesh(m.vertices, m.faces)", ...)
-  reticulate::py_run_string(sprintf("simp = sk.simplify(m, ratio=%s)",ratio), ...)
-  reticulate::py_run_string(sprintf("cntr = sk.contract(simp, SL=%s, WH0=%s, iter_lim=%s, epsilon=%s, precision=%s, validate=%s, operator='%s', progress=False)",
-                                    SL,WH0,iter_lim,epsilon,precision,ifelse(validate,"True","False"), operator),...)
-  skeletonize.params <- if(method=="vertex_clusters"){
-    sprintf("sampling_dist=%s, cluster_pos='%s'",sampling_dist,cluster_pos)
-  }else{
-    sprintf("shape_weight=%s, sample_weight=%s",shape_weight,sample_weight)
+  reticulate::py_run_string(sprintf("simp = sk.pre.simplify(m, ratio=%s)",ratio), ...)
+  if (method == "wavefront") {
+    reticulate::py_run_string(sprintf("skel = sk.skeletonize.by_wavefront(simp, waves=%s, step_size=%s, progress=False)",
+                                      waves, step_size, operator),...)
+  } else {
+    reticulate::py_run_string(sprintf("cntr = sk.pre.contract(simp, SL=%s, WH0=%s, iter_lim=%s, epsilon=%s, precision=%s, validate=%s, operator='%s', progress=False)",
+                                      SL,WH0,iter_lim,epsilon,precision,ifelse(validate,"True","False"), operator),...)
+    if(method=="vertex_clusters"){
+      skeletonize.params <- sprintf("sampling_dist=%s, cluster_pos='%s'",sampling_dist,cluster_pos)
+      reticulate::py_run_string(sprintf("skel = sk.skeletonize.by_vertex_clusters(cntr, %s, progress=False)",
+                                        skeletonize.params), ...)
+    } else {
+      skeletonize.params <- sprintf("shape_weight=%s, sample_weight=%s",shape_weight,sample_weight)
+      reticulate::py_run_string(sprintf("skel = sk.skeletonize.by_edge_collapse(cntr, method='%s', %s, progress=False)",
+                                        skeletonize.params), ...)
+    }
   }
-  reticulate::py_run_string(sprintf("swc = sk.skeletonize(cntr, method='%s', %s, progress=False, drop_disconnected=True)",
-                                    method, skeletonize.params), ...)
   if(clean){
-    reticulate::py_run_string(sprintf("swc = sk.clean(swc=swc, mesh=simp, theta=%s)", theta), ...)
+    reticulate::py_run_string("skel = sk.post.clean_up(skel, mesh=simp)", ...)
   }
   if(radius){
    radius.params <- if(method.radii=="knn"){
@@ -471,12 +492,12 @@ py_skeletor <- function(id,
      }
      sprintf("n_rays=%s, projection='%s', fallback=%s", n_rays, projection, fallback)
    }
-   reticulate::py_run_string(sprintf("swc['radius'] = sk.radii(swc, simp, method='%s', %s, aggregate='mean')",method.radii, radius.params), ...)
+   reticulate::py_run_string(sprintf("sk.post.radii(skel, simp, method='%s', %s, aggregate='mean')",method.radii, radius.params), ...)
   }else{
-    reticulate::py_run_string("swc['radius'] = 0", ...)
+    reticulate::py_run_string("skel.swc['radius'] = 0", ...)
   }
-  reticulate::py_run_string("for c in ['x', 'y', 'z']: swc[c] = swc[c].astype(int)", ...)
-  swc = reticulate::py$swc
+  reticulate::py_run_string("for c in ['x', 'y', 'z']: skel.swc[c] = skel.swc[c].astype(int)", ...)
+  swc = reticulate::py$skel$swc
   colnames(swc) = c("PointNo","Parent","X","Y","Z","W")
   neuron = nat::as.neuron(swc)
   if(heal){

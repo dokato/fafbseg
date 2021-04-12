@@ -24,7 +24,7 @@ skeletor(
   precision = 1e-06,
   validate = TRUE,
   method.radii = c("knn", "ray"),
-  method = c("vertex_clusters", "edge_collapse"),
+  method = c("vertex_clusters", "edge_collapse", "wavefront"),
   heal = TRUE,
   heal.k = 10L,
   heal.threshold = Inf,
@@ -42,6 +42,8 @@ skeletor(
   sample_weight = 0.1,
   cpu = Inf,
   elapsed = Inf,
+  waves = 1,
+  step_size = 1,
   ...
 )
 
@@ -147,7 +149,8 @@ geodesic distance along the mesh's surface. It's fast and scales well but
 can lead to oversimplification. Good for quick & dirty skeletonisations.
 \code{"edge_collapse"} implements skeleton extraction by edge collapse
 described Au et al. 2008. It's rather slow and doesn't scale well but is
-really good at preserving topology.}
+really good at preserving topology. Another method is \code{"wavefront"} -
+this algorithm tries to find rings of vertices and collapse them to their center.}
 
 \item{heal}{logical. Whether or not, if the neuron id fragmented, to stitch
 multiple fragments into single neuron using minimum spanning tree.}
@@ -218,9 +221,17 @@ long edges.}
 
 \item{elapsed}{double (of length one). Set a limit on the total elapsed cpu time in seconds}
 
-\item{...}{Additional arguments passed to \code{reticulate::py_run_string}.}
+\item{waves}{(for \code{method = "wavefront"}) Number of waves to run across the mesh. Each wave is
+initialized at a different vertex which produces slightly different rings.
+The final skeleton is produced from a mean  across all waves. More waves produce
+higher resolution skeletons but also introduce more noise.}
 
-\item{x}{a \code{nat::neuron} object.}
+\item{step_size}{(for \code{method = "wavefront"}) Values greater 1 effectively
+lead to binning of rings. For example a stepsize of 2 means that two adjacent
+vertex rings will be collapsed to the same center. This can help reduce noise
+in the skeleton}
+
+\item{...}{Additional arguments passed to \code{reticulate::py_run_string}.}
 }
 \value{
 A \code{nat::neuronlist} containing neuron skeleton objects.
@@ -290,7 +301,7 @@ This pipeline:
 
   Ratio: lower ratio = less vertices = faster
 
-  epsilon: lower target contraction rate = less steps = faster
+  epsilon: lower target contraction rate = lesssteps = faster
 
   SL: faster contraction = pot. less steps to target contraction rate = faster
 
